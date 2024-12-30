@@ -2,7 +2,7 @@
 all: test deployment
 
 install:
-	pip install .
+	python3 -m pip install .
 
 # run the Python test suite
 test: install
@@ -16,7 +16,7 @@ clean:
 
 # build the deployment package
 deployment: clean
-	python3 -m build -s -w
+	python3 -m build --sdist --wheel
 
 # ship the deployment package to PyPi
 ship: test deployment
