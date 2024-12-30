@@ -1,6 +1,6 @@
 """Test cases for the Super Mario Bros meta environment."""
 from unittest import TestCase
-from ..smb_env import SuperMarioBrosEnv
+from gym_super_mario_bros.smb_env import SuperMarioBrosEnv
 
 
 class ShouldRaiseErrorOnInvalidRomMode(TestCase):
@@ -58,15 +58,15 @@ class ShouldStepGameEnv(TestCase):
         self.assertIsNone(env.unwrapped._target_stage)
         self.assertIsNone(env.unwrapped._target_area)
         env.reset()
-        s, r, d, i = env.step(0)
-        self.assertEqual(0, i['coins'])
-        self.assertEqual(False, i['flag_get'])
-        self.assertEqual(2, i['life'])
-        self.assertEqual(1, i['world'])
-        self.assertEqual(0, i['score'])
-        self.assertEqual(1, i['stage'])
-        self.assertEqual(400, i['time'])
-        self.assertEqual(40, i['x_pos'])
+        state, reward, terminated, truncated, info = env.step(0)
+        self.assertEqual(0, info['coins'])
+        self.assertEqual(False, info['flag_get'])
+        self.assertEqual(2, info['life'])
+        self.assertEqual(1, info['world'])
+        self.assertEqual(0, info['score'])
+        self.assertEqual(1, info['stage'])
+        self.assertEqual(400, info['time'])
+        self.assertEqual(40, info['x_pos'])
         env.close()
 
 
@@ -78,13 +78,13 @@ class ShouldStepStageEnv(TestCase):
         self.assertIsInstance(env.unwrapped._target_stage, int)
         self.assertIsInstance(env.unwrapped._target_area, int)
         env.reset()
-        s, r, d, i = env.step(0)
-        self.assertEqual(0, i['coins'])
-        self.assertEqual(False, i['flag_get'])
-        self.assertEqual(2, i['life'])
-        self.assertEqual(4, i['world'])
-        self.assertEqual(0, i['score'])
-        self.assertEqual(2, i['stage'])
-        self.assertEqual(400, i['time'])
-        self.assertEqual(40, i['x_pos'])
+        state, reward, terminated, truncated, info = env.step(0)
+        self.assertEqual(0, info['coins'])
+        self.assertEqual(False, info['flag_get'])
+        self.assertEqual(2, info['life'])
+        self.assertEqual(4, info['world'])
+        self.assertEqual(0, info['score'])
+        self.assertEqual(2, info['stage'])
+        self.assertEqual(400, info['time'])
+        self.assertEqual(40, info['x_pos'])
         env.close()

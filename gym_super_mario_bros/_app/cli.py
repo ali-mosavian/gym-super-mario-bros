@@ -1,11 +1,11 @@
 """Super Mario Bros for OpenAI Gym."""
 import argparse
 import sys
-import gym
+import gymnasium as gym
 from nes_py.wrappers import JoypadSpace
 from nes_py.app.play_human import play_human
 from nes_py.app.play_random import play_random
-from ..actions import RIGHT_ONLY, SIMPLE_MOVEMENT, COMPLEX_MOVEMENT
+from gym_super_mario_bros.actions import RIGHT_ONLY, SIMPLE_MOVEMENT, COMPLEX_MOVEMENT
 
 
 # a key mapping of action spaces to wrap with
@@ -58,7 +58,7 @@ def main():
         print('--stages,-S should only be specified for RandomStages environments')
         sys.exit(1)
     # build the environment with the given ID
-    env = gym.make(args.env, stages=args.stages)
+    env = gym.make(args.env)
     # wrap the environment with an action space if specified
     if args.actionspace != 'nes':
         print(args.actionspace)

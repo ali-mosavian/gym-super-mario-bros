@@ -2,8 +2,8 @@
 from collections import defaultdict
 from nes_py import NESEnv
 import numpy as np
-from ._roms import decode_target
-from ._roms import rom_path
+from gym_super_mario_bros._roms import decode_target
+from gym_super_mario_bros._roms import rom_path
 
 
 # create a dictionary mapping value of status register to string names
@@ -139,7 +139,7 @@ class SuperMarioBrosEnv(NESEnv):
     def _x_position(self):
         """Return the current horizontal position."""
         # add the current page 0x6d to the current x
-        return self.ram[0x6d] * 0x100 + self.ram[0x86]
+        return int(self.ram[0x6d]) * 0x100 + int(self.ram[0x86])
 
     @property
     def _left_x_position(self):
@@ -277,21 +277,21 @@ class SuperMarioBrosEnv(NESEnv):
         """Skip occupied states by running out a timer and skipping frames."""
         while self._is_busy or self._is_world_over:
             self._runout_prelevel_timer()
-            self._frame_advance(0)
+            self.frame_advance(0)
 
     def _skip_start_screen(self):
         """Press and release start to skip the start screen."""
         # press and release the start button
-        self._frame_advance(8)
-        self._frame_advance(0)
+        self.frame_advance(8)
+        self.frame_advance(0)
         # Press start until the game starts
         while self._time == 0:
             # press and release the start button
-            self._frame_advance(8)
+            self.frame_advance(8)
             # if we're in the single stage, environment, write the stage data
             if self.is_single_stage_env:
                 self._write_stage()
-            self._frame_advance(0)
+            self.frame_advance(0)
             # run-out the prelevel timer to skip the animation
             self._runout_prelevel_timer()
         # set the last time to now
@@ -299,8 +299,8 @@ class SuperMarioBrosEnv(NESEnv):
         # after the start screen idle to skip some extra frames
         while self._time >= self._time_last:
             self._time_last = self._time
-            self._frame_advance(8)
-            self._frame_advance(0)
+            self.frame_advance(8)
+            self.frame_advance(0)
 
     def _skip_end_of_world(self):
         """Skip the cutscene that plays at the end of a world."""
@@ -310,14 +310,14 @@ class SuperMarioBrosEnv(NESEnv):
             # loop until the time is different
             while self._time == time:
                 # frame advance with NOP
-                self._frame_advance(0)
+                self.frame_advance(0)
 
     def _kill_mario(self):
         """Skip a death animation by forcing Mario to death."""
         # force Mario's state to dead
         self.ram[0x000e] = 0x06
         # step forward one frame
-        self._frame_advance(0)
+        self.frame_advance(0)
 
     # MARK: Reward Function
 

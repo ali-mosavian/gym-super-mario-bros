@@ -1,7 +1,7 @@
 """Registration code of Gym environments in this package."""
-from .smb_env import SuperMarioBrosEnv
-from .smb_random_stages_env import SuperMarioBrosRandomStagesEnv
-from ._registration import make
+from gym_super_mario_bros.smb_env import SuperMarioBrosEnv
+from gym_super_mario_bros.smb_random_stages_env import SuperMarioBrosRandomStagesEnv
+from gym_super_mario_bros._registration import make
 
 
 # define the outward facing API of this package

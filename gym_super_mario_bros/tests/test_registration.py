@@ -1,6 +1,6 @@
 """Test cases for the gym registered environments."""
 from unittest import TestCase
-from .._registration import make
+from gym_super_mario_bros._registration import make
 
 
 class ShouldMakeEnv:
@@ -34,15 +34,15 @@ class ShouldMakeEnv:
         else:
             env = make(env_id)
         env.reset(seed=self.seed)
-        s, r, d, i = env.step(0)
-        self.assertEqual(self.coins, i['coins'])
-        self.assertEqual(self.flag_get, i['flag_get'])
-        self.assertEqual(self.life, i['life'])
-        self.assertEqual(self.world, i['world'])
-        self.assertEqual(self.score, i['score'])
-        self.assertEqual(self.stage, i['stage'])
-        self.assertEqual(self.time, i['time'])
-        self.assertEqual(self.x_pos, i['x_pos'])
+        state, reward, terminated, truncated, info = env.step(0)
+        self.assertEqual(self.coins, info['coins'])
+        self.assertEqual(self.flag_get, info['flag_get'])
+        self.assertEqual(self.life, info['life'])
+        self.assertEqual(self.world, info['world'])
+        self.assertEqual(self.score, info['score'])
+        self.assertEqual(self.stage, info['stage'])
+        self.assertEqual(self.time, info['time'])
+        self.assertEqual(self.x_pos, info['x_pos'])
         env.close()
 
     def test(self):
