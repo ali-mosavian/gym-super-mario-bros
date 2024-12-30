@@ -1,0 +1,63 @@
+[build-system]
+requires = ["setuptools>=39.0.1"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gym_super_mario_bros"
+version = "7.5.0"
+description = "Super Mario Bros. for Gymnasium"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "Proprietary"}
+authors = [
+    {name = "Christian Kauten", email = "kautencreations@gmail.com"},
+    {name = "Ali Mosavian", email = "ali@42labs.ai"},
+]
+keywords = [
+    "Gymnasium",
+    "NES",
+    "Super-Mario-Bros",
+    "Lost-Levels",
+    "Reinforcement-Learning-Environment",
+]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: Free For Educational Use",
+    "Operating System :: MacOS :: MacOS X",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Games/Entertainment :: Side-Scrolling/Arcade Games",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "gymnasium",
+    "matplotlib",
+    "numpy<3",
+    "nes-py @ git+https://github.com/ali-mosavian/nes-py.git@v9.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/Kautenja/gym-super-mario-bros"
+
+[project.scripts]
+gym_super_mario_bros = "gym_super_mario_bros._app.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["gym_super_mario_bros"]
+exclude = ["tests", "*.tests", "*.tests.*"]
+
+[tool.setuptools.package-data]
+gym_super_mario_bros = ["../requirements.txt", "_roms/*.nes"]
+
+[project.optional-dependencies]
+dev = [
+    "twine>=1.11.0",
+]

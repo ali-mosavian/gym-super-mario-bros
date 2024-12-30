@@ -1,6 +1,0 @@
-gymnasium
-matplotlib
-numpy<3
-setuptools>=39.0.1
-twine>=1.11.0
-git+https://github.com/ali-mosavian/nes-py.git

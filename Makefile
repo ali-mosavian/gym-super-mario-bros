@@ -1,8 +1,11 @@
 # build everything
 all: test deployment
 
+install:
+	pip install .
+
 # run the Python test suite
-test:
+test: install
 	python3 -m unittest discover .
 
 # clean the build directory
@@ -13,7 +16,7 @@ clean:
 
 # build the deployment package
 deployment: clean
-	python3 setup.py sdist bdist_wheel
+	python3 -m build -s -w
 
 # ship the deployment package to PyPi
 ship: test deployment
