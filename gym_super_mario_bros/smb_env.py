@@ -1,9 +1,13 @@
 """An OpenAI Gym environment for Super Mario Bros. and Lost Levels."""
+from functools import wraps
+from typing import Callable
 from collections import defaultdict
-from nes_py import NESEnv
+
 import numpy as np
-from gym_super_mario_bros._roms import decode_target
+from nes_py import NESEnv
+
 from gym_super_mario_bros._roms import rom_path
+from gym_super_mario_bros._roms import decode_target
 
 
 # create a dictionary mapping value of status register to string names
@@ -23,6 +27,15 @@ _ENEMY_TYPE_ADDRESSES = [0x0016, 0x0017, 0x0018, 0x0019, 0x001A]
 # Bowser = 0x2D
 # Flagpole = 0x31
 _STAGE_OVER_ENEMIES = np.array([0x2D, 0x31])
+
+
+def cast_return_type_to(type_) -> Callable[[Callable], Callable]:
+    def wrapper(func) -> Callable:
+        def wrapper_inner(self, *args, **kwargs):
+            return_value = func(self, *args, **kwargs)
+            return type_(return_value)
+        return wrapper_inner
+    return wrapper
 
 
 class SuperMarioBrosEnv(NESEnv):
@@ -93,55 +106,65 @@ class SuperMarioBrosEnv(NESEnv):
         return int(''.join(map(str, self.ram[address:address + length])))
 
     @property
+    @cast_return_type_to(int)
     def _level(self):
         """Return the level of the game."""
         return self.ram[0x075f] * 4 + self.ram[0x075c]
 
     @property
+    @cast_return_type_to(int)
     def _world(self):
         """Return the current world (1 to 8)."""
         return self.ram[0x075f] + 1
 
     @property
+    @cast_return_type_to(int)
     def _stage(self):
         """Return the current stage (1 to 4)."""
         return self.ram[0x075c] + 1
 
     @property
+    @cast_return_type_to(int)
     def _area(self):
         """Return the current area number (1 to 5)."""
         return self.ram[0x0760] + 1
 
     @property
+    @cast_return_type_to(int)
     def _score(self):
         """Return the current player score (0 to 999990)."""
         # score is represented as a figure with 6 10's places
         return self._read_mem_range(0x07de, 6)
 
     @property
+    @cast_return_type_to(int)
     def _time(self):
         """Return the time left (0 to 999)."""
         # time is represented as a figure with 3 10's places
         return self._read_mem_range(0x07f8, 3)
 
     @property
+    @cast_return_type_to(int)
     def _coins(self):
         """Return the number of coins collected (0 to 99)."""
         # coins are represented as a figure with 2 10's places
         return self._read_mem_range(0x07ed, 2)
 
     @property
+    @cast_return_type_to(int)
     def _life(self):
         """Return the number of remaining lives."""
         return self.ram[0x075a]
 
     @property
+    @cast_return_type_to(int)
     def _x_position(self):
         """Return the current horizontal position."""
         # add the current page 0x6d to the current x
         return int(self.ram[0x6d]) * 0x100 + int(self.ram[0x86])
 
     @property
+    @cast_return_type_to(int)
     def _left_x_position(self):
         """Return the number of pixels from the left of the screen."""
         # TODO: resolve RuntimeWarning: overflow encountered in ubyte_scalars
@@ -150,11 +173,13 @@ class SuperMarioBrosEnv(NESEnv):
         return np.uint8(int(self.ram[0x86]) - int(self.ram[0x071c])) % 256
 
     @property
+    @cast_return_type_to(int)
     def _y_pixel(self):
         """Return the current vertical position."""
         return self.ram[0x03b8]
 
     @property
+    @cast_return_type_to(int)
     def _y_viewport(self):
         """
         Return the current y viewport.
@@ -169,6 +194,7 @@ class SuperMarioBrosEnv(NESEnv):
         return self.ram[0x00b5]
 
     @property
+    @cast_return_type_to(int)
     def _y_position(self):
         """Return the current vertical position."""
         # check if Mario is above the viewport (the score board area)
@@ -179,11 +205,13 @@ class SuperMarioBrosEnv(NESEnv):
         return 255 - self._y_pixel
 
     @property
+    @cast_return_type_to(str)
     def _player_status(self):
         """Return the player status as a string."""
         return _STATUS_MAP[self.ram[0x0756]]
 
     @property
+    @cast_return_type_to(int)
     def _player_state(self):
         """
         Return the current player state.
@@ -206,16 +234,19 @@ class SuperMarioBrosEnv(NESEnv):
         return self.ram[0x000e]
 
     @property
+    @cast_return_type_to(bool)
     def _is_dying(self):
         """Return True if Mario is in dying animation, False otherwise."""
         return self._player_state == 0x0b or self._y_viewport > 1
 
     @property
+    @cast_return_type_to(bool)
     def _is_dead(self):
         """Return True if Mario is dead, False otherwise."""
         return self._player_state == 0x06
 
     @property
+    @cast_return_type_to(bool)
     def _is_game_over(self):
         """Return True if the game has ended, False otherwise."""
         # the life counter will get set to 255 (0xff) when there are no lives
@@ -223,11 +254,13 @@ class SuperMarioBrosEnv(NESEnv):
         return self._life == 0xff
 
     @property
+    @cast_return_type_to(bool)
     def _is_busy(self):
         """Return boolean whether Mario is busy with in-game garbage."""
         return self._player_state in _BUSY_STATES
 
     @property
+    @cast_return_type_to(bool)
     def _is_world_over(self):
         """Return a boolean determining if the world is over."""
         # 0x0770 contains GamePlay mode:
@@ -237,6 +270,7 @@ class SuperMarioBrosEnv(NESEnv):
         return self.ram[0x0770] == 2
 
     @property
+    @cast_return_type_to(bool)
     def _is_stage_over(self):
         """Return a boolean determining if the level is over."""
         # iterate over the memory addresses that hold enemy types
@@ -251,6 +285,7 @@ class SuperMarioBrosEnv(NESEnv):
         return False
 
     @property
+    @cast_return_type_to(bool)
     def _flag_get(self):
         """Return a boolean determining if the agent reached a flag."""
         return self._is_world_over or self._is_stage_over
