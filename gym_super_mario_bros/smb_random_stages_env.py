@@ -238,7 +238,39 @@ class SuperMarioBrosRandomStagesEnv(gym.Env):
     def get_action_meanings(self):
         """Return the list of strings describing the action space actions."""
         return self.env.get_action_meanings()
+    
+    def load_state(self, snapshot):
+        """Load the state of the environment from a snapshot."""
+        self.env.load_state(snapshot)
 
+    def dump_state(self):
+        """Save the state of the environment to a snapshot."""
+        return self.env.dump_state()
+    
+    @property
+    def _viewer(self):
+        """Return the snapshot of the environment."""
+        return self.viewer
+    
+    @_viewer.setter
+    def _viewer(self, viewer):
+        """Set the viewer."""
+        self.viewer = viewer
+    
+    @property
+    def _emulator(self):
+        """Return the emulator."""
+        return self.env._emulator
+    
+    @property
+    def _screen_buffer(self):
+        """Return the screen buffer."""
+        return self.env._screen_buffer
 
+    @property
+    def _memory_buffer(self):
+        """Return the memory buffer."""
+        return self.env._memory_buffer
+    
 # explicitly define the outward facing API of this module
 __all__ = [SuperMarioBrosRandomStagesEnv.__name__]

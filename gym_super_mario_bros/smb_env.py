@@ -42,7 +42,7 @@ class SuperMarioBrosEnv(NESEnv):
     """An environment for playing Super Mario Bros with OpenAI Gym."""
 
     # the legal range of rewards for each step
-    reward_range = (-15, 15)
+    reward_range = (-25, 15)
 
     def __init__(self, rom_mode='vanilla', lost_levels=False, target=None):
         """
@@ -400,6 +400,11 @@ class SuperMarioBrosEnv(NESEnv):
         """Handle any RAM hacking after a reset occurs."""
         self._time_last = self._time
         self._x_position_last = self._x_position
+    
+    def _did_restore(self):
+        self._done = self._get_done()
+        self._time_last = self._time
+        self._x_position_last = self._x_position        
 
     def _did_step(self, done):
         """
