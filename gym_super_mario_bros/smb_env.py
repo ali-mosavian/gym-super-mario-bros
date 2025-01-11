@@ -6,8 +6,8 @@ from collections import defaultdict
 import numpy as np
 from nes_py import NESEnv
 
-from gym_super_mario_bros._roms import rom_path
-from gym_super_mario_bros._roms import decode_target
+from gym_super_mario_bros.roms import rom_path
+from gym_super_mario_bros.roms import decode_target
 
 
 # create a dictionary mapping value of status register to string names
