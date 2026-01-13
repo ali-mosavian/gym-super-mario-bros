@@ -1,7 +1,7 @@
 """An OpenAI Gym environment for Super Mario Bros. and Lost Levels."""
-from functools import wraps
-from typing import Callable
 from collections import defaultdict
+from collections import deque
+from typing import Callable
 
 import numpy as np
 from nes_py import NESEnv
@@ -42,7 +42,17 @@ class SuperMarioBrosEnv(NESEnv):
     """An environment for playing Super Mario Bros with OpenAI Gym."""
 
     # the legal range of rewards for each step
-    reward_range = (-25, 15)
+    reward_range = (-51, 106)
+
+    # Reward configuration constants
+    TIME_PENALTY = -0.1          # Every step costs, no camping!
+    PROGRESS_SCALE = 0.5         # Per-pixel bonus for new forward progress
+    MOMENTUM_WINDOW = 10         # Frames to average for momentum calculation
+    MOMENTUM_THRESHOLD = 1.5     # Min avg speed to start getting momentum bonus
+    MOMENTUM_SCALE = 0.3         # Bonus scales: (avg_speed - threshold) * scale
+    POWERUP_LOSS_PENALTY = -15.0 # Penalty for losing powerup (tall/fire → small)
+    DEATH_PENALTY = -50.0        # Heavy penalty for dying
+    FLAG_REWARD = 100.0          # Ultimate goal reward
 
     def __init__(self, rom_mode='vanilla', lost_levels=False, target=None):
         """
@@ -70,6 +80,14 @@ class SuperMarioBrosEnv(NESEnv):
         self._time_last = 0
         # setup a variable to keep track of the last frames x position
         self._x_position_last = 0
+        # track the furthest x position ever reached (only reward new progress)
+        self._x_position_max = 0
+        # track if flag was already rewarded this episode
+        self._flag_rewarded = False
+        # rolling window of recent speeds for momentum calculation
+        self._speed_history: deque[float] = deque(maxlen=self.MOMENTUM_WINDOW)
+        # track previous player status for powerup loss detection
+        self._status_last: str = "small"
         # reset the emulator
         self.reset()
         # skip the start screen
@@ -356,38 +374,84 @@ class SuperMarioBrosEnv(NESEnv):
 
     # MARK: Reward Function
 
-    @property
-    def _x_reward(self):
-        """Return the reward based on left right movement between steps."""
-        _reward = self._x_position - self._x_position_last
-        self._x_position_last = self._x_position
-        # TODO: check whether this is still necessary
-        # resolve an issue where after death the x position resets. The x delta
-        # is typically has at most magnitude of 3, 5 is a safe bound
-        if _reward < -5 or _reward > 5:
-            return 0
+    def _calculate_movement_rewards(self):
+        """
+        Calculate movement-based rewards (progress, momentum).
 
-        return _reward
+        Returns a tuple of (progress_reward, momentum_reward).
+        Updates internal state for position and speed history tracking.
+
+        Only rewards NEW forward progress beyond the furthest point ever reached.
+        Going back and forth does NOT give rewards.
+        """
+        current_x = self._x_position
+        delta = current_x - self._x_position_last
+        self._x_position_last = current_x
+
+        # resolve an issue where after death the x position resets
+        # the x delta is typically has at most magnitude of 3, 5 is a safe bound
+        if delta < -5 or delta > 5:
+            self._speed_history.clear()
+            return 0.0, 0.0
+
+        # Track speed for momentum calculation (even when not making new progress)
+        current_speed = max(0.0, float(delta))
+        self._speed_history.append(current_speed)
+
+        # Only reward progress BEYOND the furthest point ever reached
+        new_progress = current_x - self._x_position_max
+        if new_progress > 0:
+            self._x_position_max = current_x
+            # Per-pixel bonus for new forward progress
+            progress_reward = new_progress * self.PROGRESS_SCALE
+        else:
+            progress_reward = 0.0
+
+        # Momentum bonus: scales with avg speed above threshold
+        # Higher sustained speed = bigger bonus
+        if len(self._speed_history) >= self.MOMENTUM_WINDOW:
+            avg_speed = sum(self._speed_history) / len(self._speed_history)
+            if avg_speed >= self.MOMENTUM_THRESHOLD:
+                # Scales linearly: at avg 1.5 -> 0, at avg 3.0 -> 0.45
+                momentum_reward = (avg_speed - self.MOMENTUM_THRESHOLD) * self.MOMENTUM_SCALE
+            else:
+                momentum_reward = 0.0
+        else:
+            momentum_reward = 0.0
+
+        return progress_reward, momentum_reward
 
     @property
     def _time_penalty(self):
-        """Return the reward for the in-game clock ticking."""
-        _reward = self._time - self._time_last
-        self._time_last = self._time
-        # time can only decrease, a positive reward results from a reset and
-        # should default to 0 reward
-        if _reward > 0:
-            return 0
-
-        return _reward
+        """Return the constant time penalty for each step."""
+        return self.TIME_PENALTY
 
     @property
     def _death_penalty(self):
         """Return the reward earned by dying."""
         if self._is_dying or self._is_dead:
-            return -25
+            return self.DEATH_PENALTY
+        return 0.0
 
-        return 0
+    @property
+    def _powerup_loss_penalty(self):
+        """Return penalty for losing powerup (tall/fireball -> small)."""
+        current_status = self._player_status
+        previous_status = self._status_last
+        self._status_last = current_status
+
+        # Penalize going from powered up to small
+        if previous_status in ("tall", "fireball") and current_status == "small":
+            return self.POWERUP_LOSS_PENALTY
+        return 0.0
+
+    @property
+    def _flag_reward(self):
+        """Return +FLAG_REWARD when the flag is reached (once per episode)."""
+        if self._flag_get and not self._flag_rewarded:
+            self._flag_rewarded = True
+            return self.FLAG_REWARD
+        return 0.0
 
     # MARK: nes-py API calls
 
@@ -395,16 +459,28 @@ class SuperMarioBrosEnv(NESEnv):
         """Handle and RAM hacking before a reset occurs."""
         self._time_last = 0
         self._x_position_last = 0
+        self._x_position_max = 0
+        self._flag_rewarded = False
+        self._speed_history.clear()
+        self._status_last = "small"
 
     def _did_reset(self):
         """Handle any RAM hacking after a reset occurs."""
         self._time_last = self._time
         self._x_position_last = self._x_position
-    
+        self._x_position_max = self._x_position
+        self._flag_rewarded = False
+        self._speed_history.clear()
+        self._status_last = self._player_status
+
     def _did_restore(self):
         self._done = self._get_done()
         self._time_last = self._time
-        self._x_position_last = self._x_position        
+        self._x_position_last = self._x_position
+        self._x_position_max = self._x_position
+        self._flag_rewarded = False
+        self._speed_history.clear()
+        self._status_last = self._player_status        
 
     def _did_step(self, done):
         """
@@ -433,8 +509,26 @@ class SuperMarioBrosEnv(NESEnv):
         self._skip_occupied_states()
 
     def _get_reward(self):
-        """Return the reward after a step occurs."""
-        return self._x_reward + self._time_penalty + self._death_penalty
+        """
+        Return the reward after a step occurs.
+
+        Reward components:
+        - time_penalty:   -0.1        Every step costs, no camping!
+        - progress:       +0.5/pixel  Bonus for new forward progress
+        - momentum:       scales      Bonus for sustained speed (avg >= 1.5 over 10 frames)
+        - powerup_loss:   -15.0       Penalty for losing powerup (tall/fire → small)
+        - death:          -50.0       Heavy penalty
+        - flag:           +100.0      Ultimate goal
+        """
+        progress, momentum = self._calculate_movement_rewards()
+        return (
+            self._time_penalty
+            + progress
+            + momentum
+            + self._powerup_loss_penalty
+            + self._death_penalty
+            + self._flag_reward
+        )
 
     def _get_done(self):
         """Return True if the episode is over, False otherwise."""
