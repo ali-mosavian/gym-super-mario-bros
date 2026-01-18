@@ -180,6 +180,102 @@ class SuperMarioBrosEnv(NESEnv):
 
     @property
     @cast_return_type_to(int)
+    def _screen_x(self):
+        """Return Mario's X position on the visible screen (0-255)."""
+        # Screen X = raw position - scroll + sprite offset (4 pixels for sprite center)
+        return (np.uint8(int(self.ram[0x86]) - int(self.ram[0x071c])) + 4) % 256
+
+    @property
+    @cast_return_type_to(int)
+    def _screen_y(self):
+        """Return Mario's Y position on the visible screen (0-239, 0=top)."""
+        # 0x00CE is player's vertical position on screen
+        # Add +24 offset to account for sprite rendering (top-left vs actual sprite center)
+        return self.ram[0x00CE] + 24
+
+    # Enemy type ID to name mapping (from SMB RAM map)
+    _ENEMY_TYPE_NAMES = {
+        0x00: "GreenKoopaTroopa",
+        0x01: "RedKoopaTroopa", 
+        0x02: "BuzzyBeetle",
+        0x03: "RedKoopaTroopa2",
+        0x04: "GreenKoopaTroopa2",
+        0x05: "HammerBros",
+        0x06: "Goomba",
+        0x07: "Blooper",
+        0x08: "BulletBill",
+        0x09: "GreenKoopaParatroopa",
+        0x0A: "GreyCheepCheep",
+        0x0B: "RedCheepCheep",
+        0x0C: "Podoboo",
+        0x0D: "PiranhaPlant",
+        0x0E: "GreenKoopaParatroopa2",
+        0x0F: "RedKoopaParatroopa",
+        0x10: "GreenKoopaParatroopa3",
+        0x11: "Lakitu",
+        0x12: "Spiny",
+        0x14: "FlyingCheepCheep",
+        0x15: "BowserFire",
+        0x1B: "Firework",
+        0x1D: "BulletBillOrCheepCheep",
+        0x24: "Bowser",
+    }
+
+    @property
+    def _enemy_positions(self):
+        """
+        Return positions of up to 5 enemies on screen.
+        
+        Returns:
+            List of dicts with 'type', 'type_name', 'x', 'y' for each active enemy.
+        """
+        enemies = []
+        # Calculate scroll in world coordinates (page * 256 + offset)
+        scroll_page = int(self.ram[0x071a])
+        scroll_offset = int(self.ram[0x071c])
+        scroll_world = scroll_page * 256 + scroll_offset
+        
+        for i in range(5):
+            enemy_drawn = int(self.ram[0x000F + i])  # Enemy drawn flag
+            enemy_type = int(self.ram[0x0016 + i])
+            # Only include if enemy is drawn (0x000F-0x0013 flags)
+            # Note: type=0x00 is valid (GreenKoopaTroopa), so don't filter by type!=0
+            if enemy_drawn != 0:
+                # Enemy position in world coordinates
+                enemy_page = int(self.ram[0x006E + i])
+                enemy_raw_x = int(self.ram[0x0087 + i])
+                enemy_world_x = enemy_page * 256 + enemy_raw_x
+                
+                # Screen X = world position - scroll + sprite offset
+                screen_x = enemy_world_x - scroll_world + 4
+                
+                # Add +12 offset for Y to match actual sprite rendering position
+                enemy_y = int(self.ram[0x00CF + i]) + 12
+                
+                # Only include if enemy is on visible screen (X: 0-256, Y: 0-255)
+                # Y can go up to ~255 for enemies near the bottom of the screen
+                if 0 <= screen_x <= 256 and 0 <= enemy_y <= 255:
+                    enemy_x = max(0, min(255, screen_x))  # Clamp to screen bounds
+                    type_name = self._ENEMY_TYPE_NAMES.get(enemy_type, f"Unknown_{enemy_type}")
+                    enemies.append({
+                        'type': enemy_type,
+                        'type_name': type_name,
+                        'x': enemy_x,
+                        'y': enemy_y,
+                    })
+        return enemies
+
+    @property
+    def _num_enemies(self):
+        """Return the number of active enemies on screen."""
+        count = 0
+        for i in range(5):
+            if self.ram[0x000F + i] != 0:  # Use drawn flag instead of type
+                count += 1
+        return count
+
+    @property
+    @cast_return_type_to(int)
     def _y_viewport(self):
         """
         Return the current y viewport.
@@ -455,6 +551,12 @@ class SuperMarioBrosEnv(NESEnv):
             world=self._world,
             x_pos=self._x_position,
             y_pos=self._y_position,
+            # Screen-relative positions (where Mario appears on the visible screen)
+            screen_x=self._screen_x,  # 0-255, left edge of screen = 0
+            screen_y=self._screen_y,  # 0-255, top of screen = 0
+            # Enemy information
+            enemies=self._enemy_positions,  # List of {type, x, y} for active enemies
+            num_enemies=self._num_enemies,  # Count of active enemies
         )
 
 
