@@ -149,10 +149,7 @@ class VectorSuperMarioBrosEnv:
     def _prewarm_snapshots(self):
         """Pre-create snapshots for levels based on mode.
         
-        Uses a single temporary VectorEmulator to create all snapshots,
-        destroying and recreating it for each level to ensure clean state.
-        This is more efficient than creating many separate emulators which
-        can cause threading issues.
+        Uses parallel snapshot creation when multiple levels are needed.
         """
         if self._level_mode == LevelMode.SINGLE:
             levels_to_create = [self._default_level]
@@ -161,18 +158,108 @@ class VectorSuperMarioBrosEnv:
         else:  # RANDOM - pre-create all levels
             levels_to_create = get_level_list(self._lost_levels)
 
-        # Create all snapshots using temporary emulators
-        # We create a fresh emulator for each level because reset_env
-        # doesn't properly clear game state between levels
-        for level in levels_to_create:
-            self._create_snapshot_for_level_fresh(level)
+        if len(levels_to_create) == 1:
+            # Single level - use simple sequential method
+            self._create_snapshot_for_level_fresh(levels_to_create[0])
+        else:
+            # Multiple levels - create all in parallel
+            self._create_snapshots_parallel(levels_to_create)
+
+    def _create_snapshots_parallel(self, levels: List[Tuple[int, int, int]]):
+        """Create snapshots for multiple levels in parallel using VectorEmulator.
+        
+        This is much faster than creating them sequentially because all
+        emulators step in parallel using C++ threads.
+        """
+        import gc
+        
+        num_levels = len(levels)
+        
+        # Create a VectorEmulator with one env per level
+        temp_vec = VectorEmulator(self._rom_path, num_levels)
+        
+        # Create MarioGame instances for RAM access
+        games: List[MarioGame] = []
+        for idx in range(num_levels):
+            temp_vec.reset_env(idx)
+            ram = temp_vec.memory_buffer(idx)
+            games.append(MarioGame(ram=ram))
+        
+        # Track per-environment state
+        started = np.zeros(num_levels, dtype=bool)  # Game has started (time != 0)
+        ready = np.zeros(num_levels, dtype=bool)    # Game is fully ready
+        time_last = np.zeros(num_levels, dtype=np.int32)
+        
+        # Actions array - all environments get same action each step
+        actions = np.zeros(num_levels, dtype=np.uint8)
+        
+        # Phase 1: Press start to skip title screen
+        actions[:] = 8  # Start button
+        temp_vec.step(actions)
+        actions[:] = 0
+        temp_vec.step(actions)
+        
+        # Phase 2: Press start and set level until game starts (max 500 iterations)
+        for _ in range(500):
+            # Check which envs have started
+            for idx in range(num_levels):
+                if not started[idx] and games[idx].time != 0:
+                    started[idx] = True
+                    time_last[idx] = games[idx].time
+            
+            # All started?
+            if started.all():
+                break
+            
+            # Press start for envs that haven't started
+            actions[:] = 0
+            actions[~started] = 8
+            temp_vec.step(actions)
+            
+            # Set level and run out timer for envs that haven't started
+            for idx in range(num_levels):
+                if not started[idx]:
+                    world, stage, area = levels[idx]
+                    games[idx].set_level(world, stage, area)
+                    games[idx].runout_prelevel_timer()
+            
+            actions[:] = 0
+            temp_vec.step(actions)
+        
+        # Phase 3: Wait for game to be fully ready (time starts decreasing)
+        for _ in range(100):
+            # Check which envs are ready
+            for idx in range(num_levels):
+                if started[idx] and not ready[idx]:
+                    if games[idx].time < time_last[idx]:
+                        ready[idx] = True
+                    time_last[idx] = games[idx].time
+            
+            # All ready?
+            if ready.all():
+                break
+            
+            # Keep stepping envs that aren't ready
+            actions[:] = 0
+            actions[~ready] = 8
+            temp_vec.step(actions)
+            actions[:] = 0
+            temp_vec.step(actions)
+        
+        # Capture all snapshots
+        for idx in range(num_levels):
+            snapshot = temp_vec.dump_state(idx).copy()
+            self._level_snapshots[levels[idx]] = snapshot
+        
+        # Cleanup
+        del games
+        del temp_vec
+        gc.collect()
 
     def _create_snapshot_for_level_fresh(self, level: Tuple[int, int, int]) -> np.ndarray:
-        """Create a snapshot for a level using a fresh temporary emulator.
+        """Create a snapshot for a single level using a fresh temporary emulator.
         
-        We must create a fresh emulator for each level because:
-        1. reset_env doesn't properly reset RAM
-        2. load_state to initial doesn't work after game has started
+        Used for single-level modes or on-demand snapshot creation.
         """
         import gc
         
