@@ -20,6 +20,8 @@ from gym_super_mario_bros.smb_game import MarioGame
 from gym_super_mario_bros.smb_game import get_level_list
 from gym_super_mario_bros.smb_game import get_next_level
 from gym_super_mario_bros.smb_game import get_random_level
+from gym_super_mario_bros.smb_game import warm_up_level
+from gym_super_mario_bros.smb_game import warm_up_levels
 
 
 class VectorSuperMarioBrosEnv:
@@ -185,66 +187,8 @@ class VectorSuperMarioBrosEnv:
             ram = temp_vec.memory_buffer(idx)
             games.append(MarioGame(ram=ram))
         
-        # Track per-environment state
-        started = np.zeros(num_levels, dtype=bool)  # Game has started (time != 0)
-        ready = np.zeros(num_levels, dtype=bool)    # Game is fully ready
-        time_last = np.zeros(num_levels, dtype=np.int32)
-        
-        # Actions array - all environments get same action each step
-        actions = np.zeros(num_levels, dtype=np.uint8)
-        
-        # Phase 1: Press start to skip title screen
-        actions[:] = 8  # Start button
-        temp_vec.step(actions)
-        actions[:] = 0
-        temp_vec.step(actions)
-        
-        # Phase 2: Press start and set level until game starts (max 500 iterations)
-        for _ in range(500):
-            # Check which envs have started
-            for idx in range(num_levels):
-                if not started[idx] and games[idx].time != 0:
-                    started[idx] = True
-                    time_last[idx] = games[idx].time
-            
-            # All started?
-            if started.all():
-                break
-            
-            # Press start for envs that haven't started
-            actions[:] = 0
-            actions[~started] = 8
-            temp_vec.step(actions)
-            
-            # Set level and run out timer for envs that haven't started
-            for idx in range(num_levels):
-                if not started[idx]:
-                    world, stage, area = levels[idx]
-                    games[idx].set_level(world, stage, area)
-                    games[idx].runout_prelevel_timer()
-            
-            actions[:] = 0
-            temp_vec.step(actions)
-        
-        # Phase 3: Wait for game to be fully ready (time starts decreasing)
-        for _ in range(100):
-            # Check which envs are ready
-            for idx in range(num_levels):
-                if started[idx] and not ready[idx]:
-                    if games[idx].time < time_last[idx]:
-                        ready[idx] = True
-                    time_last[idx] = games[idx].time
-            
-            # All ready?
-            if ready.all():
-                break
-            
-            # Keep stepping envs that aren't ready
-            actions[:] = 0
-            actions[~ready] = 8
-            temp_vec.step(actions)
-            actions[:] = 0
-            temp_vec.step(actions)
+        # Warm up all levels in parallel
+        warm_up_levels(games, levels, temp_vec.step)
         
         # Capture all snapshots
         for idx in range(num_levels):
@@ -265,8 +209,6 @@ class VectorSuperMarioBrosEnv:
         
         if level in self._level_snapshots:
             return self._level_snapshots[level]
-
-        world, stage, area = level
         
         # Create fresh emulator for this level
         temp_vec = VectorEmulator(self._rom_path, 1)
@@ -274,27 +216,8 @@ class VectorSuperMarioBrosEnv:
         temp_ram = temp_vec.memory_buffer(0)
         temp_game = MarioGame(ram=temp_ram)
         
-        # Skip start screen, writing level data
-        temp_vec.step_single(0, 8)  # Start button
-        temp_vec.step_single(0, 0)
-        
-        # Press start until game starts (max 500 iterations for safety)
-        for _ in range(500):
-            if temp_game.time != 0:
-                break
-            temp_vec.step_single(0, 8)
-            temp_game.set_level(world, stage, area)
-            temp_vec.step_single(0, 0)
-            temp_game.runout_prelevel_timer()
-        
-        # Wait for game to fully start (max 100 iterations)
-        time_last = temp_game.time
-        for _ in range(100):
-            if temp_game.time < time_last:
-                break
-            time_last = temp_game.time
-            temp_vec.step_single(0, 8)
-            temp_vec.step_single(0, 0)
+        # Warm up to the target level
+        warm_up_level(temp_game, level, lambda a: temp_vec.step_single(0, a))
         
         # Save snapshot and copy the state data so it outlives temp_vec
         snapshot = temp_vec.dump_state(0).copy()

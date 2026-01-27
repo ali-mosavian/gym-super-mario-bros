@@ -395,6 +395,126 @@ def get_next_level(
     return levels[0]
 
 
+# =============================================================================
+# Warm-up helpers - skip start screen and set level
+# =============================================================================
+
+from typing import Callable
+from typing import Sequence
+
+
+def warm_up_levels(
+    games: Sequence[MarioGame],
+    levels: Sequence[Tuple[int, int, int]],
+    step_fn: Callable[[np.ndarray], None],
+    max_start_iters: int = 500,
+    max_ready_iters: int = 100,
+) -> None:
+    """Warm up games to their target levels by skipping start screen.
+    
+    This function handles the NES start screen sequence:
+    1. Press start to skip title screen
+    2. Press start + set level via RAM until game starts (time != 0)
+    3. Wait until game is fully ready (time starts decreasing)
+    
+    Works for both single game (N=1) and batch (N>1) cases.
+    
+    Args:
+        games: Sequence of MarioGame instances (each with RAM access)
+        levels: Sequence of (world, stage, area) tuples, one per game
+        step_fn: Function that steps all emulators given action array (np.ndarray)
+        max_start_iters: Max iterations to wait for game start
+        max_ready_iters: Max iterations to wait for game ready
+    """
+    n = len(games)
+    if n == 0:
+        return
+    
+    # Per-game state tracking
+    started = np.zeros(n, dtype=bool)   # Game has started (time != 0)
+    ready = np.zeros(n, dtype=bool)     # Game is fully ready
+    time_last = np.zeros(n, dtype=np.int32)
+    actions = np.zeros(n, dtype=np.uint8)
+    
+    # Phase 1: Press start to skip title screen
+    actions[:] = 8  # Start button
+    step_fn(actions)
+    actions[:] = 0
+    step_fn(actions)
+    
+    # Phase 2: Press start + set level until game starts (time != 0)
+    for _ in range(max_start_iters):
+        # Check which games have started
+        for i in range(n):
+            if not started[i] and games[i].time != 0:
+                started[i] = True
+                time_last[i] = games[i].time
+        
+        # All started?
+        if started.all():
+            break
+        
+        # Press start for games that haven't started
+        actions[:] = 0
+        actions[~started] = 8
+        step_fn(actions)
+        
+        # Set level and run out timer for games that haven't started
+        for i in range(n):
+            if not started[i]:
+                world, stage, area = levels[i]
+                games[i].set_level(world, stage, area)
+                games[i].runout_prelevel_timer()
+        
+        actions[:] = 0
+        step_fn(actions)
+    
+    # Phase 3: Wait for game to be fully ready (time starts decreasing)
+    for _ in range(max_ready_iters):
+        # Check which games are ready
+        for i in range(n):
+            if started[i] and not ready[i]:
+                if games[i].time < time_last[i]:
+                    ready[i] = True
+                time_last[i] = games[i].time
+        
+        # All ready?
+        if ready.all():
+            break
+        
+        # Keep stepping games that aren't ready
+        actions[:] = 0
+        actions[~ready] = 8
+        step_fn(actions)
+        actions[:] = 0
+        step_fn(actions)
+
+
+def warm_up_level(
+    game: MarioGame,
+    level: Tuple[int, int, int],
+    step_fn: Callable[[int], None],
+    max_start_iters: int = 500,
+    max_ready_iters: int = 100,
+) -> None:
+    """Convenience wrapper for warming up a single game.
+    
+    Args:
+        game: MarioGame instance with RAM access
+        level: (world, stage, area) tuple
+        step_fn: Function that steps the emulator given a single action (int)
+        max_start_iters: Max iterations to wait for game start
+        max_ready_iters: Max iterations to wait for game ready
+    """
+    warm_up_levels(
+        [game],
+        [level],
+        lambda actions: step_fn(int(actions[0])),
+        max_start_iters,
+        max_ready_iters,
+    )
+
+
 # Exports
 __all__ = [
     "MarioGame",
@@ -405,4 +525,6 @@ __all__ = [
     "get_level_list",
     "get_random_level",
     "get_next_level",
+    "warm_up_levels",
+    "warm_up_level",
 ]
