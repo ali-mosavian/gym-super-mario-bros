@@ -1,28 +1,25 @@
 """A vectorized Super Mario Bros environment using C++ parallel emulation."""
-from typing import Any, Dict, List, Optional, Tuple, Union
-from collections import defaultdict
+from typing import Any
+from typing import Dict
+from typing import List
+from typing import Optional
+from typing import Tuple
+from typing import Union
 
 import numpy as np
-from gymnasium.spaces import Box, Discrete
+from gymnasium.spaces import Box
+from gymnasium.spaces import Discrete
 from gymnasium.vector.utils import batch_space
 
 from nes_py.emulator import VectorEmulator
 
-from gym_super_mario_bros.roms import rom_path
 from gym_super_mario_bros.roms import decode_target
-
-
-# create a dictionary mapping value of status register to string names
-_STATUS_MAP = defaultdict(lambda: "fireball", {0: "small", 1: "tall"})
-
-# a set of state values indicating that Mario is "busy"
-_BUSY_STATES = [0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x07]
-
-# RAM addresses for enemy types on the screen
-_ENEMY_TYPE_ADDRESSES = [0x0016, 0x0017, 0x0018, 0x0019, 0x001A]
-
-# enemies whose context indicate that a stage change will occur
-_STAGE_OVER_ENEMIES = np.array([0x2D, 0x31])
+from gym_super_mario_bros.roms import rom_path
+from gym_super_mario_bros.smb_game import LevelMode
+from gym_super_mario_bros.smb_game import MarioGame
+from gym_super_mario_bros.smb_game import get_level_list
+from gym_super_mario_bros.smb_game import get_next_level
+from gym_super_mario_bros.smb_game import get_random_level
 
 
 class VectorSuperMarioBrosEnv:
@@ -31,16 +28,29 @@ class VectorSuperMarioBrosEnv:
     
     This environment steps multiple Mario games in parallel using the
     VectorEmulator, which uses C++ threads for true parallelism. It provides
-    a gymnasium VectorEnv-like interface.
+    a gymnasium VectorEnv-like interface with auto-reset support.
     
     Args:
         num_envs: Number of parallel environments
         rom_mode: ROM mode ('vanilla', 'downsample', 'pixel', 'rectangle')
         lost_levels: Whether to use Lost Levels ROM
-        target: Optional (world, stage) tuple for single-stage environments
+        level_mode: Level selection mode:
+            - LevelMode.SINGLE: Play one specific level (requires target)
+            - LevelMode.SEQUENTIAL: Play levels in order, advancing on completion
+            - LevelMode.RANDOM: Random level on each reset
+        target: (world, stage) tuple for SINGLE mode, or starting level for SEQUENTIAL
+        auto_reset: If True, automatically reset terminated environments
     
     Example:
-        >>> env = VectorSuperMarioBrosEnv(num_envs=8)
+        >>> # Single level mode
+        >>> env = VectorSuperMarioBrosEnv(num_envs=8, level_mode=LevelMode.SINGLE, target=(1, 1))
+        
+        >>> # Random levels mode  
+        >>> env = VectorSuperMarioBrosEnv(num_envs=8, level_mode=LevelMode.RANDOM)
+        
+        >>> # Sequential levels mode
+        >>> env = VectorSuperMarioBrosEnv(num_envs=8, level_mode=LevelMode.SEQUENTIAL)
+        
         >>> obs, info = env.reset()
         >>> obs, rewards, terminated, truncated, info = env.step(actions)
     """
@@ -53,29 +63,62 @@ class VectorSuperMarioBrosEnv:
         num_envs: int,
         rom_mode: str = "vanilla",
         lost_levels: bool = False,
+        level_mode: LevelMode = LevelMode.SINGLE,
         target: Optional[Tuple[int, int]] = None,
+        auto_reset: bool = True,
     ):
         self._num_envs = num_envs
         self._rom_mode = rom_mode
         self._lost_levels = lost_levels
+        self._level_mode = level_mode
+        self._auto_reset = auto_reset
 
-        # decode the ROM path based on mode and lost levels flag
+        # Decode ROM path
         self._rom_path = rom_path(lost_levels, rom_mode)
 
-        # set the target world, stage, and area variables
-        target_decoded = decode_target(target, lost_levels)
-        self._target_world, self._target_stage, self._target_area = target_decoded
+        # Handle target based on level mode
+        if level_mode == LevelMode.SINGLE:
+            if target is None:
+                target = (1, 1)  # Default to 1-1
+            target_decoded = decode_target(target, lost_levels)
+            self._default_level = target_decoded
+        else:
+            # For RANDOM/SEQUENTIAL, target is optional starting point
+            if target is not None:
+                target_decoded = decode_target(target, lost_levels)
+                self._default_level = target_decoded
+            else:
+                self._default_level = (1, 1, 1)
 
-        # create the vectorized emulator
+        # Level snapshot cache: (world, stage, area) -> snapshot bytes
+        self._level_snapshots: Dict[Tuple[int, int, int], np.ndarray] = {}
+
+        # IMPORTANT: Pre-warm level snapshots BEFORE creating the main emulator.
+        # Creating many temp VectorEmulators after the main emulator causes thread
+        # synchronization issues that make load_state hang. By creating snapshots
+        # first, we avoid this problem.
+        self._prewarm_snapshots()
+
+        # Create the vectorized emulator (after prewarming snapshots)
         self._emulator = VectorEmulator(self._rom_path, num_envs)
 
-        # per-environment state tracking
-        self._time_last = np.zeros(num_envs, dtype=np.int32)
-        self._x_position_last = np.zeros(num_envs, dtype=np.int32)
-        self._done = np.ones(num_envs, dtype=bool)  # Start as done until reset
-        self._snapshots: List[Optional[np.ndarray]] = [None] * num_envs
+        # Random generator for level selection
+        self._rng = np.random.default_rng()
 
-        # gymnasium spaces
+        # Create MarioGame instances for each environment
+        self._games: List[MarioGame] = []
+        for idx in range(num_envs):
+            ram = self._emulator.memory_buffer(idx)
+            game = MarioGame(ram=ram)
+            self._games.append(game)
+
+        # Per-environment current level tracking
+        self._current_levels: List[Tuple[int, int, int]] = [self._default_level] * num_envs
+
+        # Done tracking
+        self._done = np.ones(num_envs, dtype=bool)
+
+        # Gymnasium spaces
         self.single_observation_space = Box(
             low=0,
             high=255,
@@ -86,7 +129,7 @@ class VectorSuperMarioBrosEnv:
         self.observation_space = batch_space(self.single_observation_space, num_envs)
         self.action_space = batch_space(self.single_action_space, num_envs)
 
-        # initialize all environments
+        # Initialize all environments
         self._initialize_all()
 
     @property
@@ -95,155 +138,115 @@ class VectorSuperMarioBrosEnv:
         return self._num_envs
 
     @property
-    def is_single_stage_env(self) -> bool:
-        """Return True if this environment is a stage environment."""
-        return self._target_world is not None and self._target_area is not None
+    def level_mode(self) -> LevelMode:
+        """Return the level selection mode."""
+        return self._level_mode
 
     # =========================================================================
-    # Memory access helpers (vectorized)
+    # Level snapshot management
     # =========================================================================
 
-    def _get_ram(self, idx: int) -> np.ndarray:
-        """Get RAM buffer for environment idx."""
-        return self._emulator.memory_buffer(idx)
+    def _prewarm_snapshots(self):
+        """Pre-create snapshots for levels based on mode.
+        
+        Uses a single temporary VectorEmulator to create all snapshots,
+        destroying and recreating it for each level to ensure clean state.
+        This is more efficient than creating many separate emulators which
+        can cause threading issues.
+        """
+        if self._level_mode == LevelMode.SINGLE:
+            levels_to_create = [self._default_level]
+        elif self._level_mode == LevelMode.SEQUENTIAL:
+            levels_to_create = [self._default_level]
+        else:  # RANDOM - pre-create all levels
+            levels_to_create = get_level_list(self._lost_levels)
 
-    def _read_mem_range(self, idx: int, address: int, length: int) -> int:
-        """Read a range of bytes where each byte is a 10's place figure."""
-        ram = self._get_ram(idx)
-        return int("".join(map(str, ram[address : address + length])))
+        # Create all snapshots using temporary emulators
+        # We create a fresh emulator for each level because reset_env
+        # doesn't properly clear game state between levels
+        for level in levels_to_create:
+            self._create_snapshot_for_level_fresh(level)
 
-    def _get_level(self, idx: int) -> int:
-        ram = self._get_ram(idx)
-        return int(ram[0x075F] * 4 + ram[0x075C])
+    def _create_snapshot_for_level_fresh(self, level: Tuple[int, int, int]) -> np.ndarray:
+        """Create a snapshot for a level using a fresh temporary emulator.
+        
+        We must create a fresh emulator for each level because:
+        1. reset_env doesn't properly reset RAM
+        2. load_state to initial doesn't work after game has started
+        """
+        import gc
+        
+        if level in self._level_snapshots:
+            return self._level_snapshots[level]
 
-    def _get_world(self, idx: int) -> int:
-        return int(self._get_ram(idx)[0x075F] + 1)
+        world, stage, area = level
+        
+        # Create fresh emulator for this level
+        temp_vec = VectorEmulator(self._rom_path, 1)
+        temp_vec.reset_env(0)
+        temp_ram = temp_vec.memory_buffer(0)
+        temp_game = MarioGame(ram=temp_ram)
+        
+        # Skip start screen, writing level data
+        temp_vec.step_single(0, 8)  # Start button
+        temp_vec.step_single(0, 0)
+        
+        # Press start until game starts (max 500 iterations for safety)
+        for _ in range(500):
+            if temp_game.time != 0:
+                break
+            temp_vec.step_single(0, 8)
+            temp_game.set_level(world, stage, area)
+            temp_vec.step_single(0, 0)
+            temp_game.runout_prelevel_timer()
+        
+        # Wait for game to fully start (max 100 iterations)
+        time_last = temp_game.time
+        for _ in range(100):
+            if temp_game.time < time_last:
+                break
+            time_last = temp_game.time
+            temp_vec.step_single(0, 8)
+            temp_vec.step_single(0, 0)
+        
+        # Save snapshot and copy the state data so it outlives temp_vec
+        snapshot = temp_vec.dump_state(0).copy()
+        self._level_snapshots[level] = snapshot
+        
+        # Clean up temp emulator - ensure proper cleanup
+        del temp_ram
+        del temp_game
+        del temp_vec
+        gc.collect()
+        
+        return snapshot
 
-    def _get_stage(self, idx: int) -> int:
-        return int(self._get_ram(idx)[0x075C] + 1)
-
-    def _get_area(self, idx: int) -> int:
-        return int(self._get_ram(idx)[0x0760] + 1)
-
-    def _get_score(self, idx: int) -> int:
-        return self._read_mem_range(idx, 0x07DE, 6)
-
-    def _get_time(self, idx: int) -> int:
-        return self._read_mem_range(idx, 0x07F8, 3)
-
-    def _get_coins(self, idx: int) -> int:
-        return self._read_mem_range(idx, 0x07ED, 2)
-
-    def _get_life(self, idx: int) -> int:
-        return int(self._get_ram(idx)[0x075A])
-
-    def _get_x_position(self, idx: int) -> int:
-        ram = self._get_ram(idx)
-        return int(ram[0x6D]) * 0x100 + int(ram[0x86])
-
-    def _get_y_pixel(self, idx: int) -> int:
-        return int(self._get_ram(idx)[0x03B8])
-
-    def _get_y_viewport(self, idx: int) -> int:
-        return int(self._get_ram(idx)[0x00B5])
-
-    def _get_y_position(self, idx: int) -> int:
-        y_viewport = self._get_y_viewport(idx)
-        y_pixel = self._get_y_pixel(idx)
-        if y_viewport < 1:
-            return 255 + (255 - y_pixel)
-        return 255 - y_pixel
-
-    def _get_player_status(self, idx: int) -> str:
-        return _STATUS_MAP[self._get_ram(idx)[0x0756]]
-
-    def _get_player_state(self, idx: int) -> int:
-        return int(self._get_ram(idx)[0x000E])
-
-    def _is_dying(self, idx: int) -> bool:
-        return self._get_player_state(idx) == 0x0B or self._get_y_viewport(idx) > 1
-
-    def _is_dead(self, idx: int) -> bool:
-        return self._get_player_state(idx) == 0x06
-
-    def _is_game_over(self, idx: int) -> bool:
-        return self._get_life(idx) == 0xFF
-
-    def _is_busy(self, idx: int) -> bool:
-        return self._get_player_state(idx) in _BUSY_STATES
-
-    def _is_world_over(self, idx: int) -> bool:
-        return self._get_ram(idx)[0x0770] == 2
-
-    def _is_stage_over(self, idx: int) -> bool:
-        ram = self._get_ram(idx)
-        for address in _ENEMY_TYPE_ADDRESSES:
-            if ram[address] in _STAGE_OVER_ENEMIES:
-                return ram[0x001D] == 3
-        return False
-
-    def _flag_get(self, idx: int) -> bool:
-        return self._is_world_over(idx) or self._is_stage_over(idx)
+    def _get_or_create_snapshot(self, level: Tuple[int, int, int]) -> np.ndarray:
+        """Get or create a snapshot for the given level."""
+        if level in self._level_snapshots:
+            return self._level_snapshots[level]
+        return self._create_snapshot_for_level_fresh(level)
 
     # =========================================================================
-    # RAM Hacks
+    # Level selection
     # =========================================================================
 
-    def _write_stage(self, idx: int):
-        """Write the stage data to RAM to overwrite loading the next stage."""
-        ram = self._get_ram(idx)
-        ram[0x075F] = self._target_world - 1
-        ram[0x075C] = self._target_stage - 1
-        ram[0x0760] = self._target_area - 1
+    def _select_level_for_reset(self, idx: int) -> Tuple[int, int, int]:
+        """Select level for environment reset based on level mode."""
+        if self._level_mode == LevelMode.SINGLE:
+            return self._default_level
+        elif self._level_mode == LevelMode.RANDOM:
+            return get_random_level(self._rng, self._lost_levels)
+        else:  # SEQUENTIAL
+            return self._current_levels[idx]
 
-    def _runout_prelevel_timer(self, idx: int):
-        """Force the pre-level timer to 0 to skip frames during a death."""
-        self._get_ram(idx)[0x07A0] = 0
-
-    def _skip_change_area(self, idx: int):
-        """Skip change area animations by running down timers."""
-        ram = self._get_ram(idx)
-        change_area_timer = ram[0x06DE]
-        if 1 < change_area_timer < 255:
-            ram[0x06DE] = 1
-
-    def _skip_occupied_states(self, idx: int):
-        """Skip occupied states by running out a timer and skipping frames."""
-        while self._is_busy(idx) or self._is_world_over(idx):
-            self._runout_prelevel_timer(idx)
-            self._frame_advance_single(idx, 0)
-
-    def _skip_start_screen(self, idx: int):
-        """Press and release start to skip the start screen."""
-        # press and release the start button
-        self._frame_advance_single(idx, 8)
-        self._frame_advance_single(idx, 0)
-        # Press start until the game starts
-        while self._get_time(idx) == 0:
-            self._frame_advance_single(idx, 8)
-            if self.is_single_stage_env:
-                self._write_stage(idx)
-            self._frame_advance_single(idx, 0)
-            self._runout_prelevel_timer(idx)
-        # set the last time to now
-        self._time_last[idx] = self._get_time(idx)
-        # after the start screen idle to skip some extra frames
-        while self._get_time(idx) >= self._time_last[idx]:
-            self._time_last[idx] = self._get_time(idx)
-            self._frame_advance_single(idx, 8)
-            self._frame_advance_single(idx, 0)
-
-    def _skip_end_of_world(self, idx: int):
-        """Skip the cutscene that plays at the end of a world."""
-        if self._is_world_over(idx):
-            time = self._get_time(idx)
-            while self._get_time(idx) == time:
-                self._frame_advance_single(idx, 0)
-
-    def _kill_mario(self, idx: int):
-        """Skip a death animation by forcing Mario to death."""
-        self._get_ram(idx)[0x000E] = 0x06
-        self._frame_advance_single(idx, 0)
+    def _advance_level(self, idx: int):
+        """Advance to next level (for SEQUENTIAL mode after flag_get)."""
+        if self._level_mode == LevelMode.SEQUENTIAL:
+            game = self._games[idx]
+            self._current_levels[idx] = get_next_level(
+                game.world, game.stage, self._lost_levels
+            )
 
     # =========================================================================
     # Frame advance helpers
@@ -256,79 +259,58 @@ class VectorSuperMarioBrosEnv:
         self._emulator.step(actions)
 
     # =========================================================================
-    # Reward functions
+    # Skip helpers
     # =========================================================================
 
-    def _get_x_reward(self, idx: int) -> float:
-        """Return the reward based on left right movement between steps."""
-        x_pos = self._get_x_position(idx)
-        reward = x_pos - self._x_position_last[idx]
-        self._x_position_last[idx] = x_pos
-        # Resolve issue where after death the x position resets
-        if reward < -5 or reward > 5:
-            return 0
-        return reward
+    def _skip_occupied_states(self, idx: int):
+        """Skip occupied states by running out timer and skipping frames."""
+        game = self._games[idx]
+        while game.is_busy or game.is_world_over:
+            game.runout_prelevel_timer()
+            self._frame_advance_single(idx, 0)
 
-    def _get_time_penalty(self, idx: int) -> float:
-        """Return the reward for the in-game clock ticking."""
-        time = self._get_time(idx)
-        reward = time - self._time_last[idx]
-        self._time_last[idx] = time
-        # Time can only decrease, positive reward results from reset
-        if reward > 0:
-            return 0
-        return reward
+    def _skip_end_of_world(self, idx: int):
+        """Skip the cutscene at end of world."""
+        game = self._games[idx]
+        if game.is_world_over:
+            time = game.time
+            while game.time == time:
+                self._frame_advance_single(idx, 0)
 
-    def _get_death_penalty(self, idx: int) -> float:
-        """Return the reward earned by dying."""
-        if self._is_dying(idx) or self._is_dead(idx):
-            return -500
-        return 0
-
-    def _get_reward(self, idx: int) -> float:
-        """Return the total reward for this step."""
-        return self._get_x_reward(idx) + self._get_time_penalty(idx) + self._get_death_penalty(idx)
-
-    def _get_done(self, idx: int) -> bool:
-        """Return True if the episode is over, False otherwise."""
-        if self.is_single_stage_env:
-            return self._is_dying(idx) or self._is_dead(idx) or self._flag_get(idx)
-        return self._is_game_over(idx)
-
-    def _get_info(self, idx: int) -> Dict[str, Any]:
-        """Return the info for this environment."""
-        return dict(
-            coins=self._get_coins(idx),
-            flag_get=self._flag_get(idx),
-            life=self._get_life(idx),
-            score=self._get_score(idx),
-            stage=self._get_stage(idx),
-            status=self._get_player_status(idx),
-            time=self._get_time(idx),
-            world=self._get_world(idx),
-            x_pos=self._get_x_position(idx),
-            y_pos=self._get_y_position(idx),
-        )
+    def _kill_mario(self, idx: int):
+        """Skip death animation by forcing dead state."""
+        game = self._games[idx]
+        game.kill_mario()
+        self._frame_advance_single(idx, 0)
 
     # =========================================================================
     # Initialization
     # =========================================================================
 
-    def _initialize_single(self, idx: int):
-        """Initialize a single environment (skip start screen, create backup)."""
-        self._emulator.reset_env(idx)
-        self._skip_start_screen(idx)
-        # Create backup snapshot for this environment
-        # Note: VectorEmulator doesn't have dump_state per-env, so we skip this
-        # The backup will be handled differently
+    def _initialize_single(self, idx: int, level: Tuple[int, int, int]):
+        """Initialize a single environment by loading level snapshot."""
+        game = self._games[idx]
+
+        # Get or create snapshot for this level
+        snapshot = self._get_or_create_snapshot(level)
+
+        # Load snapshot into this environment
+        self._emulator.load_state(idx, snapshot)
+
+        # Track current level
+        self._current_levels[idx] = level
+
+        # Initialize reward tracking
+        game.reset_reward_state()
+
+        # Mark as not done
+        self._done[idx] = False
 
     def _initialize_all(self):
         """Initialize all environments."""
-        self._emulator.reset()
         for idx in range(self._num_envs):
-            self._skip_start_screen(idx)
-            self._time_last[idx] = self._get_time(idx)
-            self._x_position_last[idx] = self._get_x_position(idx)
+            level = self._select_level_for_reset(idx)
+            self._initialize_single(idx, level)
 
     # =========================================================================
     # Gymnasium VectorEnv interface
@@ -343,41 +325,34 @@ class VectorSuperMarioBrosEnv:
         """
         Reset all environments and return initial observations.
 
+        Args:
+            seed: Optional random seed
+            options: Optional reset options
+
         Returns:
             observations: Stacked observations from all environments
             infos: Dictionary with per-environment info
         """
-        # Reset all emulators
-        self._emulator.reset()
+        # Set seed if provided
+        if seed is not None:
+            self._rng = np.random.default_rng(seed)
 
-        # Initialize each environment
+        # Initialize each environment with appropriate level
         for idx in range(self._num_envs):
-            self._time_last[idx] = 0
-            self._x_position_last[idx] = 0
-            self._skip_start_screen(idx)
-            self._time_last[idx] = self._get_time(idx)
-            self._x_position_last[idx] = self._get_x_position(idx)
-            self._done[idx] = False
+            level = self._select_level_for_reset(idx)
+            self._initialize_single(idx, level)
 
-        # Get observations
+        # Get observations and info
         observations = np.stack(self._emulator.screen_buffer())
-
-        # Collect info
         infos = self._collect_infos()
 
         return observations, infos
 
     def reset_single(self, idx: int) -> Tuple[np.ndarray, Dict[str, Any]]:
         """Reset a single environment."""
-        self._emulator.reset_env(idx)
-        self._time_last[idx] = 0
-        self._x_position_last[idx] = 0
-        self._skip_start_screen(idx)
-        self._time_last[idx] = self._get_time(idx)
-        self._x_position_last[idx] = self._get_x_position(idx)
-        self._done[idx] = False
-
-        return self._emulator.screen_buffer(idx), self._get_info(idx)
+        level = self._select_level_for_reset(idx)
+        self._initialize_single(idx, level)
+        return self._emulator.screen_buffer(idx).copy(), self._games[idx].get_info()
 
     def step(
         self, actions: np.ndarray
@@ -405,51 +380,76 @@ class VectorSuperMarioBrosEnv:
         terminated = np.zeros(self._num_envs, dtype=bool)
 
         for idx in range(self._num_envs):
-            # Get reward
-            rewards[idx] = self._get_reward(idx)
+            game = self._games[idx]
+
+            # Compute reward
+            rewards[idx] = game.compute_reward()
             rewards[idx] = np.clip(rewards[idx], self.reward_range[0], self.reward_range[1])
 
-            # Get done flag
-            self._done[idx] = self._get_done(idx)
+            # Check if done
+            self._done[idx] = game.done
             terminated[idx] = self._done[idx]
 
-            # Handle post-step logic
+            # Handle post-step logic for non-terminated environments
             if not self._done[idx]:
-                if self._is_dying(idx):
+                if game.is_dying:
                     self._kill_mario(idx)
-                if not self.is_single_stage_env:
+                if self._level_mode != LevelMode.SINGLE:
                     self._skip_end_of_world(idx)
-                self._skip_change_area(idx)
+                game.skip_change_area()
                 self._skip_occupied_states(idx)
 
-        # Get observations
-        observations = np.stack(self._emulator.screen_buffer())
-
-        # Collect info
+        # Collect info before potential auto-reset
         infos = self._collect_infos()
+
+        # Handle auto-reset for terminated environments
+        if self._auto_reset:
+            for idx in range(self._num_envs):
+                if terminated[idx]:
+                    game = self._games[idx]
+
+                    # Store final observation in info
+                    if "final_observation" not in infos:
+                        infos["final_observation"] = [None] * self._num_envs
+                    infos["final_observation"][idx] = self._emulator.screen_buffer(idx).copy()
+
+                    # Store final info
+                    if "final_info" not in infos:
+                        infos["final_info"] = [None] * self._num_envs
+                    infos["final_info"][idx] = game.get_info()
+
+                    # Advance level if flag was reached (SEQUENTIAL mode)
+                    if game.flag_get:
+                        self._advance_level(idx)
+
+                    # Reset the environment
+                    level = self._select_level_for_reset(idx)
+                    self._initialize_single(idx, level)
+
+        # Get observations (after potential auto-reset)
+        observations = np.stack(self._emulator.screen_buffer())
 
         return observations, rewards, terminated, np.zeros(self._num_envs, dtype=bool), infos
 
     def _collect_infos(self) -> Dict[str, Any]:
         """Collect info from all environments into a batched dict."""
-        # For gymnasium compatibility, return dict with arrays
         infos: Dict[str, Any] = {
-            "coins": np.array([self._get_coins(i) for i in range(self._num_envs)]),
-            "flag_get": np.array([self._flag_get(i) for i in range(self._num_envs)]),
-            "life": np.array([self._get_life(i) for i in range(self._num_envs)]),
-            "score": np.array([self._get_score(i) for i in range(self._num_envs)]),
-            "stage": np.array([self._get_stage(i) for i in range(self._num_envs)]),
-            "status": [self._get_player_status(i) for i in range(self._num_envs)],
-            "time": np.array([self._get_time(i) for i in range(self._num_envs)]),
-            "world": np.array([self._get_world(i) for i in range(self._num_envs)]),
-            "x_pos": np.array([self._get_x_position(i) for i in range(self._num_envs)]),
-            "y_pos": np.array([self._get_y_position(i) for i in range(self._num_envs)]),
+            "coins": np.array([g.coins for g in self._games]),
+            "flag_get": np.array([g.flag_get for g in self._games]),
+            "life": np.array([g.life for g in self._games]),
+            "score": np.array([g.score for g in self._games]),
+            "stage": np.array([g.stage for g in self._games]),
+            "status": [g.player_status for g in self._games],
+            "time": np.array([g.time for g in self._games]),
+            "world": np.array([g.world for g in self._games]),
+            "x_pos": np.array([g.x_position for g in self._games]),
+            "y_pos": np.array([g.y_position for g in self._games]),
         }
         return infos
 
     def close(self):
         """Close the environment."""
-        if self._emulator is not None:
+        if hasattr(self, "_emulator") and self._emulator is not None:
             del self._emulator
             self._emulator = None
 

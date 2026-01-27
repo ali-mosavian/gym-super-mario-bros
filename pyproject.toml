@@ -41,7 +41,7 @@ dependencies = [
     "gymnasium",
     "matplotlib",
     "numpy<3",
-    "nes-py @ git+https://github.com/ali-mosavian/nes-py.git@9.1.4",
+    "nes-py>=9.2.0",
 ]
 
 [project.urls]
