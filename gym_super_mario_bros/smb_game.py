@@ -73,15 +73,16 @@ class LevelMode(Enum):
 
 
 # All levels in Super Mario Bros (world, stage, area)
+# Area values follow decode_target logic: for worlds {1,2,4,7}, if stage >= 2, area = stage + 1
 SMB_LEVELS: List[Tuple[int, int, int]] = [
-    (1, 1, 1), (1, 2, 1), (1, 3, 1), (1, 4, 1),
-    (2, 1, 1), (2, 2, 1), (2, 3, 1), (2, 4, 1),
-    (3, 1, 1), (3, 2, 1), (3, 3, 1), (3, 4, 1),
-    (4, 1, 1), (4, 2, 1), (4, 3, 1), (4, 4, 1),
-    (5, 1, 1), (5, 2, 1), (5, 3, 1), (5, 4, 1),
-    (6, 1, 1), (6, 2, 1), (6, 3, 1), (6, 4, 1),
-    (7, 1, 1), (7, 2, 1), (7, 3, 1), (7, 4, 1),
-    (8, 1, 1), (8, 2, 1), (8, 3, 1), (8, 4, 1),
+    (1, 1, 1), (1, 2, 3), (1, 3, 4), (1, 4, 5),  # World 1: area offset for stages 2+
+    (2, 1, 1), (2, 2, 3), (2, 3, 4), (2, 4, 5),  # World 2: area offset for stages 2+
+    (3, 1, 1), (3, 2, 2), (3, 3, 3), (3, 4, 4),  # World 3: no offset
+    (4, 1, 1), (4, 2, 3), (4, 3, 4), (4, 4, 5),  # World 4: area offset for stages 2+
+    (5, 1, 1), (5, 2, 2), (5, 3, 3), (5, 4, 4),  # World 5: no offset
+    (6, 1, 1), (6, 2, 2), (6, 3, 3), (6, 4, 4),  # World 6: no offset
+    (7, 1, 1), (7, 2, 3), (7, 3, 4), (7, 4, 5),  # World 7: area offset for stages 2+
+    (8, 1, 1), (8, 2, 2), (8, 3, 3), (8, 4, 4),  # World 8: no offset
 ]
 
 # Lost Levels (SMB2 Japan) levels
@@ -453,6 +454,11 @@ def warm_up_levels(
     step_fn(actions)
     
     # Phase 2: Press start + set level until game starts (time != 0)
+    # Must match smb_env._skip_start_screen order:
+    # 1. frame_advance(8) - press start
+    # 2. _write_stage() - set level RAM
+    # 3. frame_advance(0) - release
+    # 4. _runout_prelevel_timer() - run out timer
     for _ in range(max_start_iters):
         # Check which games have started
         for i in range(n):
@@ -469,15 +475,20 @@ def warm_up_levels(
         actions[~started] = 8
         step_fn(actions)
         
-        # Set level and run out timer for games that haven't started
+        # Set level for games that haven't started (AFTER press, BEFORE release)
         for i in range(n):
             if not started[i]:
                 world, stage, area = levels[i]
                 games[i].set_level(world, stage, area)
-                games[i].runout_prelevel_timer()
         
+        # Release
         actions[:] = 0
         step_fn(actions)
+        
+        # Run out timer AFTER release (matching smb_env order)
+        for i in range(n):
+            if not started[i]:
+                games[i].runout_prelevel_timer()
     
     # Phase 3: Wait for game to be fully ready (time starts decreasing)
     for _ in range(max_ready_iters):
