@@ -154,7 +154,14 @@ class VectorSuperMarioBrosEnv:
             self._games.append(game)
 
         # Per-environment current level tracking
-        self._current_levels: List[Tuple[int, int, int]] = [self._default_level] * num_envs
+        # For SEQUENTIAL mode, stagger starting levels (env 0 -> 1-1, env 1 -> 1-2, etc.)
+        if self._level_mode == LevelMode.SEQUENTIAL:
+            all_levels = get_level_list(self._lost_levels)
+            self._current_levels = [
+                all_levels[idx % len(all_levels)] for idx in range(num_envs)
+            ]
+        else:
+            self._current_levels = [self._default_level] * num_envs
 
         # Done tracking
         self._done = np.ones(num_envs, dtype=bool)
@@ -217,7 +224,8 @@ class VectorSuperMarioBrosEnv:
         if self._level_mode == LevelMode.SINGLE:
             levels_to_create = [self._default_level]
         elif self._level_mode == LevelMode.SEQUENTIAL:
-            levels_to_create = [self._default_level]
+            # Pre-warm all levels since envs start at staggered positions
+            levels_to_create = get_level_list(self._lost_levels)
         else:  # RANDOM - pre-create all levels
             levels_to_create = get_level_list(self._lost_levels)
 
