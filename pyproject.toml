@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gym_super_mario_bros"
-version = "7.8.0"
+version = "7.9.0"
 description = "Super Mario Bros. for Gymnasium"
 readme = "README.md"
 requires-python = ">=3.8"
@@ -41,7 +41,7 @@ dependencies = [
     "gymnasium",
     "matplotlib",
     "numpy<3",
-    "nes-py>=9.2.0",
+    "nes-py>=9.3.0",
 ]
 
 [project.urls]
