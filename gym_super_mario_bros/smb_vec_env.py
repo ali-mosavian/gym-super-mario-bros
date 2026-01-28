@@ -109,6 +109,40 @@ class VectorSuperMarioBrosEnv:
         # Create the vectorized emulator (after prewarming snapshots)
         self._emulator = VectorEmulator(self._rom_path, num_envs)
 
+        # Configure C++ batch RAM reading for info collection
+        # This is much faster than individual Python property access
+        # Format: (address, size, type) where type: 0=INT, 1=BCD
+        from gym_super_mario_bros.smb_game import RAM
+        self._emulator.configure_ram_reads([
+            (RAM.SCORE_START, 6, 1),   # 0: score (BCD)
+            (RAM.TIME_START, 3, 1),    # 1: time (BCD)
+            (RAM.COINS_START, 2, 1),   # 2: coins (BCD)
+            (RAM.LIFE, 1, 0),          # 3: life
+            (RAM.WORLD, 1, 0),         # 4: world (0-indexed)
+            (RAM.STAGE, 1, 0),         # 5: stage (0-indexed)
+            (RAM.X_PAGE, 1, 0),        # 6: x_page
+            (RAM.X_POS, 1, 0),         # 7: x_pos
+            (RAM.Y_PIXEL, 1, 0),       # 8: y_pixel
+            (RAM.Y_VIEWPORT, 1, 0),    # 9: y_viewport
+            (RAM.PLAYER_STATUS, 1, 0), # 10: player_status
+            (RAM.PLAYER_STATE, 1, 0),  # 11: player_state
+            (RAM.GAMEPLAY_MODE, 1, 0), # 12: gameplay_mode (is_world_over)
+        ])
+        # Indices for accessing RAM values
+        self._RAM_SCORE = 0
+        self._RAM_TIME = 1
+        self._RAM_COINS = 2
+        self._RAM_LIFE = 3
+        self._RAM_WORLD = 4
+        self._RAM_STAGE = 5
+        self._RAM_X_PAGE = 6
+        self._RAM_X_POS = 7
+        self._RAM_Y_PIXEL = 8
+        self._RAM_Y_VIEWPORT = 9
+        self._RAM_PLAYER_STATUS = 10
+        self._RAM_PLAYER_STATE = 11
+        self._RAM_GAMEPLAY_MODE = 12
+
         # Random generator for level selection
         self._rng = np.random.default_rng()
 
@@ -490,32 +524,54 @@ class VectorSuperMarioBrosEnv:
 
         return observations, rewards, terminated, self._truncated_buffer, infos
 
+    # Status map for player_status conversion (matches smb_game._STATUS_MAP)
+    _STATUS_MAP = {0: "small", 1: "tall", 2: "fireball"}
+
     def _collect_infos(self) -> Dict[str, Any]:
         """Collect info from all environments into a batched dict.
         
-        Uses pre-allocated arrays for numeric values to avoid allocation overhead.
+        Uses C++ batch RAM reading for maximum performance - all RAM values
+        are read in one C++ call instead of individual Python property access.
         """
-        # Fill pre-allocated arrays
-        for idx, g in enumerate(self._games):
-            self._info_coins[idx] = g.coins
-            self._info_flag_get[idx] = g.flag_get
-            self._info_life[idx] = g.life
-            self._info_score[idx] = g.score
-            self._info_stage[idx] = g.stage
-            self._info_time[idx] = g.time
-            self._info_world[idx] = g.world
-            self._info_x_pos[idx] = g.x_position
-            self._info_y_pos[idx] = g.y_position
+        # Get all RAM values from C++ (one call, shape: [num_envs, num_specs])
+        ram = self._emulator.ram_values()
         
-        # Return dict with views to pre-allocated arrays
-        # Note: status is a string so we can't pre-allocate it
+        # Copy to pre-allocated arrays (vectorized operations)
+        np.copyto(self._info_score, ram[:, self._RAM_SCORE])
+        np.copyto(self._info_time, ram[:, self._RAM_TIME])
+        np.copyto(self._info_coins, ram[:, self._RAM_COINS])
+        np.copyto(self._info_life, ram[:, self._RAM_LIFE])
+        
+        # World/stage are 0-indexed in RAM, add 1 for display
+        np.copyto(self._info_world, ram[:, self._RAM_WORLD])
+        self._info_world += 1
+        np.copyto(self._info_stage, ram[:, self._RAM_STAGE])
+        self._info_stage += 1
+        
+        # x_position = x_page * 256 + x_pos
+        np.copyto(self._info_x_pos, ram[:, self._RAM_X_PAGE])
+        self._info_x_pos *= 256
+        self._info_x_pos += ram[:, self._RAM_X_POS]
+        
+        # y_position = y_pixel + 256 * (y_viewport > 1)
+        np.copyto(self._info_y_pos, ram[:, self._RAM_Y_PIXEL])
+        self._info_y_pos += 256 * (ram[:, self._RAM_Y_VIEWPORT] > 1)
+        
+        # flag_get = gameplay_mode == 2 or is_stage_over (simplified: just gameplay_mode)
+        # Note: This is a simplification - full flag_get also checks is_stage_over
+        np.equal(ram[:, self._RAM_GAMEPLAY_MODE], 2, out=self._info_flag_get)
+        
+        # Player status strings (can't avoid loop for strings)
+        status = [self._STATUS_MAP.get(ram[i, self._RAM_PLAYER_STATUS], "small") 
+                  for i in range(self._num_envs)]
+        
         return {
             "coins": self._info_coins,
             "flag_get": self._info_flag_get,
             "life": self._info_life,
             "score": self._info_score,
             "stage": self._info_stage,
-            "status": [g.player_status for g in self._games],
+            "status": status,
             "time": self._info_time,
             "world": self._info_world,
             "x_pos": self._info_x_pos,
