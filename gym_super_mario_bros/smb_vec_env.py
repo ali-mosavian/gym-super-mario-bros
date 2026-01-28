@@ -42,6 +42,9 @@ class VectorSuperMarioBrosEnv:
             - LevelMode.RANDOM: Random level on each reset
         target: (world, stage) tuple for SINGLE mode, or starting level for SEQUENTIAL
         auto_reset: If True, automatically reset terminated environments
+        copy_obs: If True (default), observations are copied to a stable buffer.
+            Set to False for zero-copy mode where observations are direct views
+            into emulator memory (faster but views are invalidated on next step).
     
     Example:
         >>> # Single level mode
@@ -68,12 +71,14 @@ class VectorSuperMarioBrosEnv:
         level_mode: LevelMode = LevelMode.SINGLE,
         target: Optional[Tuple[int, int]] = None,
         auto_reset: bool = True,
+        copy_obs: bool = True,
     ):
         self._num_envs = num_envs
         self._rom_mode = rom_mode
         self._lost_levels = lost_levels
         self._level_mode = level_mode
         self._auto_reset = auto_reset
+        self._copy_obs = copy_obs
 
         # Decode ROM path
         self._rom_path = rom_path(lost_levels, rom_mode)
@@ -120,6 +125,22 @@ class VectorSuperMarioBrosEnv:
         # Done tracking
         self._done = np.ones(num_envs, dtype=bool)
 
+        # Pre-allocated buffers for step() to avoid repeated allocations
+        self._rewards_buffer = np.zeros(num_envs, dtype=np.float32)
+        self._terminated_buffer = np.zeros(num_envs, dtype=bool)
+        self._truncated_buffer = np.zeros(num_envs, dtype=bool)  # Always False
+        
+        # Pre-allocated info arrays (reused each step)
+        self._info_coins = np.zeros(num_envs, dtype=np.int32)
+        self._info_flag_get = np.zeros(num_envs, dtype=bool)
+        self._info_life = np.zeros(num_envs, dtype=np.int32)
+        self._info_score = np.zeros(num_envs, dtype=np.int32)
+        self._info_stage = np.zeros(num_envs, dtype=np.int32)
+        self._info_time = np.zeros(num_envs, dtype=np.int32)
+        self._info_world = np.zeros(num_envs, dtype=np.int32)
+        self._info_x_pos = np.zeros(num_envs, dtype=np.int32)
+        self._info_y_pos = np.zeros(num_envs, dtype=np.int32)
+
         # Gymnasium spaces
         self.single_observation_space = Box(
             low=0,
@@ -130,6 +151,12 @@ class VectorSuperMarioBrosEnv:
         self.single_action_space = Discrete(256)
         self.observation_space = batch_space(self.single_observation_space, num_envs)
         self.action_space = batch_space(self.single_action_space, num_envs)
+
+        # Pre-allocated observation buffer for faster stacking
+        self._obs_buffer = np.zeros(
+            (num_envs, self._emulator.height, self._emulator.width, 3),
+            dtype=np.uint8,
+        )
 
         # Initialize all environments
         self._initialize_all()
@@ -263,10 +290,13 @@ class VectorSuperMarioBrosEnv:
     # =========================================================================
 
     def _frame_advance_single(self, idx: int, action: int):
-        """Advance a single frame for one environment."""
-        actions = np.zeros(self._num_envs, dtype=np.uint8)
-        actions[idx] = action
-        self._emulator.step(actions)
+        """Advance a single frame for one environment.
+        
+        Uses step_single to avoid stepping all emulators when only one needs to advance.
+        This is critical for performance - the old implementation was stepping ALL N
+        emulators just to advance one frame in one environment.
+        """
+        self._emulator.step_single(idx, action)
 
     # =========================================================================
     # Skip helpers
@@ -353,7 +383,13 @@ class VectorSuperMarioBrosEnv:
             self._initialize_single(idx, level)
 
         # Get observations and info
-        observations = np.stack(self._emulator.screen_buffer())
+        if self._copy_obs:
+            buffers = self._emulator.screen_buffer()
+            for i, buf in enumerate(buffers):
+                np.copyto(self._obs_buffer[i], buf)
+            observations = self._obs_buffer
+        else:
+            observations = self._emulator.screen_buffer()
         infos = self._collect_infos()
 
         return observations, infos
@@ -385,23 +421,27 @@ class VectorSuperMarioBrosEnv:
         # Step all emulators in parallel (C++ threads)
         self._emulator.step(actions)
 
-        # Collect results
-        rewards = np.zeros(self._num_envs, dtype=np.float32)
-        terminated = np.zeros(self._num_envs, dtype=bool)
+        # Use pre-allocated buffers (avoid allocation on hot path)
+        rewards = self._rewards_buffer
+        terminated = self._terminated_buffer
+        
+        # Cache reward range bounds for faster clipping
+        reward_min, reward_max = self.reward_range
 
         for idx in range(self._num_envs):
             game = self._games[idx]
 
-            # Compute reward
-            rewards[idx] = game.compute_reward()
-            rewards[idx] = np.clip(rewards[idx], self.reward_range[0], self.reward_range[1])
+            # Compute reward and clip inline (faster than np.clip for scalars)
+            r = game.compute_reward()
+            rewards[idx] = max(reward_min, min(reward_max, r))
 
             # Check if done
-            self._done[idx] = game.done
-            terminated[idx] = self._done[idx]
+            done = game.done
+            self._done[idx] = done
+            terminated[idx] = done
 
             # Handle post-step logic for non-terminated environments
-            if not self._done[idx]:
+            if not done:
                 if game.is_dying:
                     self._kill_mario(idx)
                 if self._level_mode != LevelMode.SINGLE:
@@ -437,25 +477,50 @@ class VectorSuperMarioBrosEnv:
                     self._initialize_single(idx, level)
 
         # Get observations (after potential auto-reset)
-        observations = np.stack(self._emulator.screen_buffer())
+        if self._copy_obs:
+            # Copy to pre-allocated buffer for stable observations
+            buffers = self._emulator.screen_buffer()
+            for i, buf in enumerate(buffers):
+                np.copyto(self._obs_buffer[i], buf)
+            observations = self._obs_buffer
+        else:
+            # Return list of views directly (faster but changes API semantics:
+            # observations is a list of views that are invalidated on next step)
+            observations = self._emulator.screen_buffer()
 
-        return observations, rewards, terminated, np.zeros(self._num_envs, dtype=bool), infos
+        return observations, rewards, terminated, self._truncated_buffer, infos
 
     def _collect_infos(self) -> Dict[str, Any]:
-        """Collect info from all environments into a batched dict."""
-        infos: Dict[str, Any] = {
-            "coins": np.array([g.coins for g in self._games]),
-            "flag_get": np.array([g.flag_get for g in self._games]),
-            "life": np.array([g.life for g in self._games]),
-            "score": np.array([g.score for g in self._games]),
-            "stage": np.array([g.stage for g in self._games]),
+        """Collect info from all environments into a batched dict.
+        
+        Uses pre-allocated arrays for numeric values to avoid allocation overhead.
+        """
+        # Fill pre-allocated arrays
+        for idx, g in enumerate(self._games):
+            self._info_coins[idx] = g.coins
+            self._info_flag_get[idx] = g.flag_get
+            self._info_life[idx] = g.life
+            self._info_score[idx] = g.score
+            self._info_stage[idx] = g.stage
+            self._info_time[idx] = g.time
+            self._info_world[idx] = g.world
+            self._info_x_pos[idx] = g.x_position
+            self._info_y_pos[idx] = g.y_position
+        
+        # Return dict with views to pre-allocated arrays
+        # Note: status is a string so we can't pre-allocate it
+        return {
+            "coins": self._info_coins,
+            "flag_get": self._info_flag_get,
+            "life": self._info_life,
+            "score": self._info_score,
+            "stage": self._info_stage,
             "status": [g.player_status for g in self._games],
-            "time": np.array([g.time for g in self._games]),
-            "world": np.array([g.world for g in self._games]),
-            "x_pos": np.array([g.x_position for g in self._games]),
-            "y_pos": np.array([g.y_position for g in self._games]),
+            "time": self._info_time,
+            "world": self._info_world,
+            "x_pos": self._info_x_pos,
+            "y_pos": self._info_y_pos,
         }
-        return infos
 
     def close(self):
         """Close the environment."""
