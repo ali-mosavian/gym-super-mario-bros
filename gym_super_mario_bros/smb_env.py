@@ -175,7 +175,8 @@ class SuperMarioBrosEnv(NESEnv):
     def _screen_x(self):
         """Return Mario's X position on the visible screen (0-255)."""
         # Screen X = raw position - scroll + sprite offset (4 pixels for sprite center)
-        return (np.uint8(int(self.ram[0x86]) - int(self.ram[0x071c])) + 4) % 256
+        # Compute in int to avoid uint8 overflow
+        return (int(self.ram[0x86]) - int(self.ram[0x071c]) + 4) % 256
 
     @property
     @cast_return_type_to(int)
